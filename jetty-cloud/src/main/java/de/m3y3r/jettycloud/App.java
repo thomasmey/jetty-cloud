@@ -1,8 +1,11 @@
 package de.m3y3r.jettycloud;
 
 import java.io.StringReader;
+import java.net.URL;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -17,6 +20,11 @@ import javax.json.JsonValue;
 import javax.json.JsonValue.ValueType;
 import javax.sql.DataSource;
 
+import org.apache.tomcat.InstanceManager;
+import org.apache.tomcat.SimpleInstanceManager;
+import org.eclipse.jetty.annotations.ServletContainerInitializersStarter;
+import org.eclipse.jetty.apache.jsp.JettyJasperInitializer;
+import org.eclipse.jetty.plus.annotation.ContainerInitializer;
 import org.eclipse.jetty.plus.jndi.Resource;
 import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.HttpConfiguration;
@@ -25,8 +33,9 @@ import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
 import org.eclipse.jetty.server.handler.DefaultHandler;
 import org.eclipse.jetty.server.handler.HandlerList;
-import org.eclipse.jetty.server.handler.ResourceHandler;
+import org.eclipse.jetty.servlet.ServletHolder;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
+import org.eclipse.jetty.webapp.WebAppContext;
 import org.postgresql.ds.PGSimpleDataSource;
 
 /**
@@ -79,25 +88,50 @@ public class App implements Runnable {
 			httpConnector.setIdleTimeout(30000);
 			server.addConnector(httpConnector);
 
-			ResourceHandler resourceHandler = new ResourceHandler();
-			resourceHandler.setDirectoriesListed(false);
-			resourceHandler.setWelcomeFiles(new String[] { "index.html" });
-			resourceHandler.setResourceBase("static-content");
+			// JSP support
+			ServletHolder jspHolder = new ServletHolder(new org.eclipse.jetty.jsp.JettyJspServlet());
+			jspHolder.setName("jsp");
+			jspHolder.setInitParameter("xpoweredBy", "false");
+			jspHolder.setInitParameter("fork", "false");
+			jspHolder.setInitParameter("logVerbosityLevel", "DEBUG");
+			jspHolder.setInitParameter("compilerTargetVM", "1.7");
+			jspHolder.setInitParameter("compilerSourceVM", "1.7");
+			jspHolder.setInitOrder(0);
 
-//			WebAppContext wac = new WebAppContext();
-//			wac.setContextPath("/example");
-//			String war = null;
-//			wac.setWar(war);
+			WebAppContext wac = new WebAppContext();
+			wac.setContextPath("/contextpath");
+			URL warUrl = App.class.getClassLoader().getResource("war/yourapp.war");
+			wac.setWar(warUrl.toString());
+			wac.addServlet(jspHolder, "*.jsp");
+			wac.addEventListener(new org.eclipse.jetty.servlet.listener.ELContextCleaner());
+			wac.addEventListener(new org.eclipse.jetty.servlet.listener.IntrospectorCleaner());
+
+			// WAT?! - Inspired from https://github.com/jetty-project/embedded-jetty-jsp/blob/master/src/main/java/org/eclipse/jetty/demo/Main.java
+			JettyJasperInitializer sci = new JettyJasperInitializer();
+			ContainerInitializer initializer = new ContainerInitializer(sci, null);
+			List<ContainerInitializer> initializers = new ArrayList<ContainerInitializer>();
+			initializers.add(initializer);
+			wac.setAttribute("org.eclipse.jetty.containerInitializers", initializers);
+			wac.setAttribute(InstanceManager.class.getName(), new SimpleInstanceManager());
+			wac.addBean(new ServletContainerInitializersStarter(wac), true);
+
+//			ClassLoader classLoader = new URLClassLoader(new URL[0], this.getClass().getClassLoader());
+//			wac.setClassLoader(classLoader);
 //			wac.setResourceBase(System.getProperty("java.io.tmpdir"));
 
+//			ResourceHandler resourceHandler = new ResourceHandler();
+//			resourceHandler.setDirectoriesListed(false);
+//			resourceHandler.setWelcomeFiles(new String[] { "index.html" });
+//			resourceHandler.setResourceBase("static-content");
+
 			HandlerList handlers = new HandlerList();
-			handlers.setHandlers(new Handler[] { /* wac, */ resourceHandler, new DefaultHandler() });
+			handlers.setHandlers(new Handler[] { wac, /* resourceHandler, */ new DefaultHandler() });
 			server.setHandler(handlers);
 
-			/* parse service and bind a datasource via JNDI */
-			List<DataSource> datasource = getDataSourceFromVcapService();
-			if(datasource.size() > 0) {
-				new Resource("jdbc/datasource", datasource.get(0));
+			/* parse service and bind as DataSource via JNDI */
+			Map<String, DataSource> datasource = getDataSourceFromVcapService();
+			for(String key: datasource.keySet()) {
+				new Resource("jdbc/" + key, datasource.get(key));
 			}
 
 			server.setDumpAfterStart(false);
@@ -117,9 +151,9 @@ public class App implements Runnable {
 	 * this expects VCAP_SERVICES v2 style json
 	 * @return
 	 */
-	private List<DataSource> getDataSourceFromVcapService() {
+	private Map<String, DataSource> getDataSourceFromVcapService() {
 
-		List<DataSource> datasources = new ArrayList<>();
+		Map<String, DataSource> datasources = new HashMap<>();
 
 		// http://docs.run.pivotal.io/devguide/deploy-apps/environment-variable.html
 		String vcapService = System.getenv(CF_VCAP_SERVICES);
@@ -149,7 +183,7 @@ public class App implements Runnable {
 					String pUri = jsCred.getString("uri");
 
 					DataSource ds = pgDataSourceFromUrl(pUri);
-					datasources.add(ds);
+					datasources.put(dbEntry.getString("name"), ds);
 				}
 				break;
 
